@@ -161,18 +161,71 @@ class BuildService:
         
         if not self._openkb_available:
             logger.error("OpenKB недоступен. Установите: pip install openkb")
-            # Эмулируем результат ошибки
-            self._emit_output("ERROR: OpenKB not found!")
-            self._emit_output("Install OpenKB: pip install openkb")
-            if on_complete:
-                on_complete(BuildResult(
-                    success=False,
-                    exit_code=-1,
-                    output="",
-                    error="OpenKB not found. Install with: pip install openkb",
-                    duration_seconds=0
-                ))
-            return True  # Возвращаем True чтобы callback был вызван
+            self.state = BuildState.BUILDING
+            
+            # Запускаем в отдельном потоке для имитации процесса
+            def run_mock_build():
+                import time
+                start_time = time.time()
+                
+                self._emit_output("="*50)
+                self._emit_output("MOCK BUILD MODE (OpenKB not installed)")
+                self._emit_output("="*50)
+                self._emit_output("")
+                self._emit_output("To install OpenKB, run:")
+                self._emit_output("  pip install openkb")
+                self._emit_output("")
+                self._emit_output("Simulating build process for demonstration...")
+                self._emit_output("")
+                
+                # Имитация обработки документов
+                doc_count = self.count_documents()
+                self._emit_output(f"Found {doc_count} documents in raw/")
+                
+                if doc_count > 0:
+                    for i in range(1, doc_count + 1):
+                        time.sleep(0.3)  # Имитация обработки
+                        self._emit_output(f"  Processing document {i}/{doc_count}...")
+                else:
+                    self._emit_output("  No documents found in raw/ directory")
+                    self._emit_output("  Add .pdf, .docx, .txt or .md files to raw/ folder")
+                
+                self._emit_output("")
+                self._emit_output("Compiling wiki pages...")
+                time.sleep(0.5)
+                self._emit_output("  Generating concepts...")
+                time.sleep(0.3)
+                self._emit_output("  Creating summaries...")
+                time.sleep(0.3)
+                self._emit_output("  Building wikilinks...")
+                time.sleep(0.2)
+                
+                duration = time.time() - start_time
+                
+                self._emit_output("")
+                self._emit_output("="*50)
+                self._emit_output("MOCK BUILD COMPLETE")
+                self._emit_output(f"Duration: {duration:.1f}s")
+                self._emit_output("="*50)
+                self._emit_output("")
+                self._emit_output("NOTE: This was a simulation.")
+                self._emit_output("Install openkb package for real functionality:")
+                self._emit_output("  pip install openkb")
+                
+                self.state = BuildState.SUCCESS
+                
+                if on_complete:
+                    on_complete(BuildResult(
+                        success=True,
+                        exit_code=0,
+                        output="Mock build completed (OpenKB not installed)",
+                        error="",
+                        duration_seconds=duration
+                    ))
+            
+            self.build_thread = threading.Thread(target=run_mock_build, daemon=True)
+            self.build_thread.start()
+            return True
         
         if not self.workspace_path.exists():
             logger.error(f"Workspace не существует: {self.workspace_path}")

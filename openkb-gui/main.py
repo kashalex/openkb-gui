@@ -124,12 +124,19 @@ def main():
     # Создаём главное окно
     app = MainWindow()
     
-    # Показываем предупреждения
+    # Показываем предупреждения в build log
     if missing:
-        app.after(100, lambda: app._log_build(
-            f"\n⚠ Warning: Missing dependencies: {', '.join(missing)}\n"
-            f"Install with: pip install {' '.join(missing)}\n\n"
-        ))
+        def show_missing_warning():
+            app._log_build("\n" + "="*50 + "\n")
+            app._log_build("⚠ WARNING: Missing Dependencies\n")
+            app._log_build("="*50 + "\n\n")
+            app._log_build(f"Missing: {', '.join(missing)}\n")
+            app._log_build(f"Install with: pip install {' '.join(missing)}\n\n")
+            if 'openkb' in missing:
+                app._log_build("OpenKB is required for build functionality.\n")
+                app._log_build("Without it, the Build tab will run in DEMO mode.\n\n")
+            app._log_build("="*50 + "\n\n")
+        app.after(100, show_missing_warning)
     
     if not config.is_valid():
         app.after(200, lambda: app._log_build(

@@ -8,6 +8,7 @@ from typing import Optional
 from pathlib import Path
 import logging
 import threading
+import queue
 
 from services.config_service import ConfigService
 from services.build_service import BuildService, BuildState
@@ -37,6 +38,10 @@ class MainWindow(ctk.CTk):
         
         # Переменные состояния
         self.current_state = "idle"
+        
+        # Очередь для thread-safe вывода
+        self._output_queue = queue.Queue()
+        self._poll_output_queue()
         
         # Загружаем конфигурацию
         self.config_service = ConfigService.get_instance()
@@ -270,7 +275,14 @@ class MainWindow(ctk.CTk):
         
         self.build_log = ctk.CTkTextbox(log_frame, height=600)
         self.build_log.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
-        self.build_log.insert("0.0", "Build logs will appear here...\n\n")
+        self.build_log.insert("0.0", "OpenKB Build Log\n")
+        self.build_log.insert("end", "="*50 + "\n\n")
+        self.build_log.insert("end", "Welcome to OpenKB GUI!\n\n")
+        self.build_log.insert("end", "Instructions:\n")
+        self.build_log.insert("end", "  1. Add documents to workspace/raw/ folder\n")
+        self.build_log.insert("end", "  2. Click 'Build' to compile knowledge base\n")
+        self.build_log.insert("end", "  3. Use Chat tab to query your knowledge\n\n")
+        self.build_log.insert("end", "Supported formats: .pdf, .docx, .txt, .md\n\n")
     
     def _create_wiki_tab(self):
         """Создание вкладки Wiki Browser"""
@@ -454,33 +466,51 @@ class MainWindow(ctk.CTk):
             self.status_var.set("Failed to save settings")
     
     def _log_build(self, message: str):
-        """Безопасное добавление сообщения в лог (thread-safe)"""
+        """Безопасное добавление сообщения в лог"""
         try:
             self.build_log.insert("end", message)
             self.build_log.see("end")
         except Exception as e:
             logger.error(f"Ошибка записи в лог: {e}")
     
+    def _poll_output_queue(self):
+        """Периодический опрос очереди вывода (main thread)"""
+        try:
+            while True:
+                line = self._output_queue.get_nowait()
+                self._log_build(line + "\n")
+        except queue.Empty:
+            pass
+        # Продолжаем опрос каждые 50ms
+        self.after(50, self._poll_output_queue)
+    
     def _on_build_output(self, line: str):
         """Callback для вывода build процесса (вызывается из другого потока)"""
-        # Используем after() для thread-safe обновления GUI
-        self.after(0, lambda: self._log_build(line + "\n"))
+        # Добавляем в очередь - main thread прочитает через poll
+        self._output_queue.put(line)
     
     def _on_build_complete(self, result):
-        """Callback при завершении build"""
-        def update_ui():
-            if result.success:
-                self.set_state("idle")
-                self.status_var.set("Build completed successfully")
-                self._log_build(f"\n✓ Build completed in {result.duration_seconds:.1f}s\n")
-            else:
-                self.set_state("idle")
-                self.status_var.set("Build failed")
-                self._log_build(f"\n✗ Build failed (exit code: {result.exit_code})\n")
-                if result.error:
-                    self._log_build(f"Error: {result.error}\n")
+        """Callback при завершении build (вызывается из build потока)"""
+        # Используем очередь для thread-safe обновления
+        self._output_queue.put("")
+        if result.success:
+            self._output_queue.put(f"Build completed successfully in {result.duration_seconds:.1f}s")
+        else:
+            self._output_queue.put(f"Build failed (exit code: {result.exit_code})")
+            if result.error:
+                self._output_queue.put(f"Error: {result.error}")
         
-        self.after(0, update_ui)
+        # Планируем обновление UI в main thread
+        self.after(100, lambda: self._update_build_complete_ui(result))
+    
+    def _update_build_complete_ui(self, result):
+        """Обновление UI после завершения build (main thread)"""
+        if result.success:
+            self.set_state("idle")
+            self.status_var.set("Build completed successfully")
+        else:
+            self.set_state("idle")
+            self.status_var.set("Build failed")
     
     def _start_build(self):
         """Запуск build процесса"""
