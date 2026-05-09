@@ -52,7 +52,7 @@ class BuildService:
         self._callbacks: list[Callable] = []
         
         # Проверяем наличие openkb
-        self._check_openkb()
+        self._openkb_available = self._check_openkb()
         
         logger.info(f"BuildService инициализирован для: {self.workspace_path}")
     
@@ -66,18 +66,34 @@ class BuildService:
                 timeout=10
             )
             if result.returncode == 0:
-                logger.info(f"OpenKB найден: {result.stdout.strip()}")
+                version = result.stdout.strip()
+                logger.info(f"OpenKB найден: {version}")
+                self._openkb_version = version
                 return True
         except FileNotFoundError:
-            logger.error("OpenKB не найден. Установите: pip install openkb")
+            logger.warning("OpenKB не найден. Установите: pip install openkb")
+            self._openkb_version = None
             return False
         except subprocess.TimeoutExpired:
             logger.warning("Таймаут проверки OpenKB")
+            self._openkb_version = None
             return False
         except Exception as e:
             logger.error(f"Ошибка проверки OpenKB: {e}")
+            self._openkb_version = None
             return False
+        self._openkb_version = None
         return False
+    
+    @property
+    def openkb_available(self) -> bool:
+        """Проверка доступности OpenKB"""
+        return self._openkb_available
+    
+    @property
+    def openkb_version(self) -> Optional[str]:
+        """Получение версии OpenKB"""
+        return self._openkb_version
     
     def add_output_callback(self, callback: Callable[[str], None]):
         """
@@ -143,9 +159,33 @@ class BuildService:
             logger.warning("Build уже выполняется")
             return False
         
+        if not self._openkb_available:
+            logger.error("OpenKB недоступен. Установите: pip install openkb")
+            # Эмулируем результат ошибки
+            self._emit_output("ERROR: OpenKB not found!")
+            self._emit_output("Install OpenKB: pip install openkb")
+            if on_complete:
+                on_complete(BuildResult(
+                    success=False,
+                    exit_code=-1,
+                    output="",
+                    error="OpenKB not found. Install with: pip install openkb",
+                    duration_seconds=0
+                ))
+            return True  # Возвращаем True чтобы callback был вызван
+        
         if not self.workspace_path.exists():
             logger.error(f"Workspace не существует: {self.workspace_path}")
-            return False
+            self._emit_output(f"ERROR: Workspace not found: {self.workspace_path}")
+            if on_complete:
+                on_complete(BuildResult(
+                    success=False,
+                    exit_code=-1,
+                    output="",
+                    error=f"Workspace not found: {self.workspace_path}",
+                    duration_seconds=0
+                ))
+            return True
         
         # Подготовка команды
         cmd = ["openkb", "build", str(self.workspace_path)]
