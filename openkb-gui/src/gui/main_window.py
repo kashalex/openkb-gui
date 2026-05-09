@@ -168,9 +168,20 @@ class MainWindow(ctk.CTk):
         row = 0
         
         # === LLM Settings ===
-        ctk.CTkLabel(settings_frame, text="LLM Configuration", 
+        ctk.CTkLabel(settings_frame, text="LLM Configuration (OpenKB)", 
                      font=ctk.CTkFont(size=16, weight="bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 5))
+        row += 1
+        
+        # Help text
+        help_text = "Model format: provider/model (e.g., zhipu/glm-4-flash, openai/gpt-4)"
+        ctk.CTkLabel(settings_frame, text=help_text, 
+                     text_color="gray").grid(row=row, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+        row += 1
+        
+        ctk.CTkLabel(settings_frame, text="LLM Model:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        self.model_entry = ctk.CTkEntry(settings_frame, width=400)
+        self.model_entry.grid(row=row, column=1, sticky="w", padx=10, pady=5)
         row += 1
         
         ctk.CTkLabel(settings_frame, text="API Key:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
@@ -183,9 +194,23 @@ class MainWindow(ctk.CTk):
         self.base_url_entry.grid(row=row, column=1, sticky="w", padx=10, pady=5)
         row += 1
         
-        ctk.CTkLabel(settings_frame, text="Model:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
-        self.model_entry = ctk.CTkEntry(settings_frame, width=400)
-        self.model_entry.grid(row=row, column=1, sticky="w", padx=10, pady=5)
+        # Common models dropdown
+        ctk.CTkLabel(settings_frame, text="Quick Select:").grid(row=row, column=0, sticky="w", padx=10, pady=5)
+        model_options = [
+            "zhipu/glm-4-flash",
+            "zhipu/glm-4",
+            "openai/gpt-4o",
+            "openai/gpt-3.5-turbo",
+            "anthropic/claude-3-sonnet",
+            "deepseek/deepseek-chat"
+        ]
+        self.model_dropdown = ctk.CTkOptionMenu(
+            settings_frame, 
+            values=model_options,
+            width=400,
+            command=self._on_model_select
+        )
+        self.model_dropdown.grid(row=row, column=1, sticky="w", padx=10, pady=5)
         row += 1
         
         ctk.CTkFrame(settings_frame, height=2).grid(row=row, column=0, columnspan=2, sticky="ew", padx=10, pady=15)
@@ -417,11 +442,26 @@ class MainWindow(ctk.CTk):
     
     # === UI Helpers ===
     
+    def _on_model_select(self, choice: str):
+        """Callback при выборе модели из dropdown"""
+        self.model_entry.delete(0, "end")
+        self.model_entry.insert(0, choice)
+    
     def _load_settings_to_ui(self):
         """Загрузка настроек в UI"""
-        self.api_key_entry.insert(0, self.config.openai_api_key or "")
-        self.base_url_entry.insert(0, self.config.openai_api_base)
-        self.model_entry.insert(0, self.config.openai_model)
+        # Загружаем LLM настройки (OpenKB)
+        self.model_entry.insert(0, self.config.llm_model or "zhipu/glm-4-flash")
+        self.api_key_entry.insert(0, self.config.llm_api_key or "")
+        self.base_url_entry.insert(0, self.config.llm_api_base or "")
+        
+        # Устанавливаем dropdown на текущее значение
+        current_model = self.config.llm_model or "zhipu/glm-4-flash"
+        try:
+            self.model_dropdown.set(current_model)
+        except:
+            pass
+        
+        # Другие настройки
         self.workspace_entry.delete(0, "end")
         self.workspace_entry.insert(0, self.config.workspace_path)
         self.pageindex_entry.insert(0, self.config.pageindex_api_key or "")
@@ -440,10 +480,15 @@ class MainWindow(ctk.CTk):
     
     def _save_settings(self):
         """Сохранение настроек"""
+        # Сохраняем LLM настройки (OpenKB)
         self.config_service.update_config(
+            llm_model=self.model_entry.get(),
+            llm_api_key=self.api_key_entry.get(),
+            llm_api_base=self.base_url_entry.get(),
+            # Также сохраняем в openai_* для совместимости
+            openai_model=self.model_entry.get(),
             openai_api_key=self.api_key_entry.get(),
             openai_api_base=self.base_url_entry.get(),
-            openai_model=self.model_entry.get(),
             workspace_path=self.workspace_entry.get(),
             pageindex_api_key=self.pageindex_entry.get(),
             watch_enabled=self.watch_enabled_var.get(),

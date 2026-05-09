@@ -16,10 +16,15 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AppConfig:
     """Конфигурация приложения"""
-    # LLM Settings
-    openai_model: str = "openai/glm-4.7-flash"
-    openai_api_base: str = "https://api.z.ai/api/paas/v4"
+    # LLM Settings (для GUI)
+    openai_model: str = "zhipu/glm-4-flash"
+    openai_api_base: str = ""
     openai_api_key: str = ""
+    
+    # OpenKB Settings (для CLI)
+    llm_model: str = "zhipu/glm-4-flash"
+    llm_api_key: str = ""
+    llm_api_base: str = ""
     
     # PageIndex OCR
     pageindex_api_key: str = ""
@@ -40,7 +45,7 @@ class AppConfig:
     
     def is_valid(self) -> bool:
         """Проверка валидности конфигурации"""
-        return bool(self.openai_api_key and self.openai_api_key != "your_api_key_here")
+        return bool(self.llm_api_key and self.llm_api_key not in ["your_api_key_here", ""])
     
     def has_pageindex(self) -> bool:
         """Проверка наличия PageIndex API ключа"""
@@ -102,14 +107,25 @@ class ConfigService:
             return self._config
         
         # Читаем значения
+        # GUI settings
         self._config.openai_model = os.getenv("OPENAI_MODEL", self._config.openai_model)
         self._config.openai_api_base = os.getenv("OPENAI_API_BASE", self._config.openai_api_base)
         self._config.openai_api_key = os.getenv("OPENAI_API_KEY", "")
+        
+        # OpenKB/LLM settings (these are what OpenKB CLI uses)
+        self._config.llm_model = os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", self._config.llm_model))
+        self._config.llm_api_key = os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+        self._config.llm_api_base = os.getenv("LLM_API_BASE", os.getenv("OPENAI_API_BASE", ""))
+        
+        # Other settings
         self._config.pageindex_api_key = os.getenv("PAGEINDEX_API_KEY", "")
         self._config.workspace_path = os.getenv("WORKSPACE_PATH", self._config.workspace_path)
         self._config.watch_enabled = os.getenv("WATCH_ENABLED", "true").lower() == "true"
         self._config.watch_debounce_seconds = int(os.getenv("WATCH_DEBOUNCE_SECONDS", "2"))
         self._config.log_level = os.getenv("LOG_LEVEL", "INFO")
+        
+        # Устанавливаем переменные окружения для OpenKB
+        self._set_openkb_env()
         
         self._config.config_loaded = True
         
@@ -132,7 +148,10 @@ class ConfigService:
             if not env_path.exists():
                 env_path.touch()
             
-            # Сохраняем значения
+            # Сохраняем значения - как GUI так и OpenKB settings
+            set_key(str(env_path), "LLM_MODEL", self._config.llm_model)
+            set_key(str(env_path), "LLM_API_KEY", self._config.llm_api_key)
+            set_key(str(env_path), "LLM_API_BASE", self._config.llm_api_base)
             set_key(str(env_path), "OPENAI_MODEL", self._config.openai_model)
             set_key(str(env_path), "OPENAI_API_BASE", self._config.openai_api_base)
             set_key(str(env_path), "OPENAI_API_KEY", self._config.openai_api_key)
@@ -141,6 +160,9 @@ class ConfigService:
             set_key(str(env_path), "WATCH_ENABLED", str(self._config.watch_enabled).lower())
             set_key(str(env_path), "WATCH_DEBOUNCE_SECONDS", str(self._config.watch_debounce_seconds))
             set_key(str(env_path), "LOG_LEVEL", self._config.log_level)
+            
+            # Устанавливаем переменные окружения для OpenKB
+            self._set_openkb_env()
             
             logger.info(f"Конфигурация сохранена в: {env_path}")
             return True
@@ -162,6 +184,22 @@ class ConfigService:
                 logger.debug(f"Обновлён параметр {key} = {value}")
             else:
                 logger.warning(f"Неизвестный параметр конфигурации: {key}")
+    
+    def _set_openkb_env(self) -> None:
+        """Установка переменных окружения для OpenKB CLI"""
+        # OpenKB использует эти переменные окружения
+        if self._config.llm_api_key:
+            os.environ["LLM_API_KEY"] = self._config.llm_api_key
+        if self._config.llm_model:
+            os.environ["LLM_MODEL"] = self._config.llm_model
+        if self._config.llm_api_base:
+            os.environ["LLM_API_BASE"] = self._config.llm_api_base
+        
+        # Также устанавливаем переменные для LiteLLM (используются некоторыми провайдерами)
+        if self._config.llm_api_key:
+            os.environ["OPENAI_API_KEY"] = self._config.llm_api_key
+        
+        logger.debug(f"OpenKB env set: LLM_MODEL={self._config.llm_model}")
     
     def validate_api_key(self, api_key: str) -> tuple[bool, str]:
         """
