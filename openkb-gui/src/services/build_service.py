@@ -7,6 +7,7 @@ import subprocess
 import threading
 import queue
 import os
+import sys
 import logging
 from pathlib import Path
 from typing import Optional, Callable
@@ -57,7 +58,11 @@ class BuildService:
         logger.info(f"BuildService инициализирован для: {self.workspace_path}")
     
     def _check_openkb(self) -> bool:
-        """Проверка наличия OpenKB"""
+        """Проверка наличия OpenKB - пробуем разные способы"""
+        self._openkb_version = None
+        self._use_python_m = False  # Флаг: использовать python -m openkb
+        
+        # Способ 1: Прямой вызов openkb
         try:
             result = subprocess.run(
                 ["openkb", "--version"],
@@ -66,23 +71,51 @@ class BuildService:
                 timeout=10
             )
             if result.returncode == 0:
-                version = result.stdout.strip()
-                logger.info(f"OpenKB найден: {version}")
+                version = result.stdout.strip() or result.stderr.strip()
+                logger.info(f"OpenKB найден (CLI): {version}")
                 self._openkb_version = version
                 return True
         except FileNotFoundError:
-            logger.warning("OpenKB не найден. Установите: pip install openkb")
-            self._openkb_version = None
-            return False
+            pass  # Продолжаем пробовать другие способы
         except subprocess.TimeoutExpired:
-            logger.warning("Таймаут проверки OpenKB")
-            self._openkb_version = None
-            return False
+            logger.warning("Таймаут проверки OpenKB (CLI)")
         except Exception as e:
-            logger.error(f"Ошибка проверки OpenKB: {e}")
-            self._openkb_version = None
-            return False
-        self._openkb_version = None
+            logger.debug(f"OpenKB CLI check failed: {e}")
+        
+        # Способ 2: python -m openkb
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "openkb", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                version = result.stdout.strip() or result.stderr.strip()
+                logger.info(f"OpenKB найден (python -m): {version}")
+                self._openkb_version = version
+                self._use_python_m = True
+                return True
+        except FileNotFoundError:
+            pass
+        except subprocess.TimeoutExpired:
+            logger.warning("Таймаут проверки OpenKB (python -m)")
+        except Exception as e:
+            logger.debug(f"OpenKB python -m check failed: {e}")
+        
+        # Способ 3: Проверка импорта модуля
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec("openkb")
+            if spec is not None:
+                logger.info("OpenKB найден (модуль установлен)")
+                self._openkb_version = "installed"
+                self._use_python_m = True
+                return True
+        except Exception as e:
+            logger.debug(f"OpenKB module check failed: {e}")
+        
+        logger.warning("OpenKB не найден. Установите: pip install openkb")
         return False
     
     @property
@@ -240,8 +273,11 @@ class BuildService:
                 ))
             return True
         
-        # Подготовка команды
-        cmd = ["openkb", "build", str(self.workspace_path)]
+        # Подготовка команды - используем python -m если прямой CLI не работает
+        if self._use_python_m:
+            cmd = [sys.executable, "-m", "openkb", "build", str(self.workspace_path)]
+        else:
+            cmd = ["openkb", "build", str(self.workspace_path)]
         
         if incremental:
             cmd.append("--incremental")

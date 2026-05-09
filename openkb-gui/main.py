@@ -53,19 +53,51 @@ def check_dependencies():
     logger = logging.getLogger(__name__)
     missing = []
     
-    # Проверяем OpenKB
+    # Проверяем OpenKB - пробуем разные способы
+    openkb_found = False
+    
+    # Способ 1: Прямой вызов CLI
     try:
         import subprocess
         result = subprocess.run(["openkb", "--version"], capture_output=True, timeout=10)
         if result.returncode == 0:
-            logger.info(f"OpenKB: {result.stdout.decode().strip()}")
-        else:
-            missing.append("openkb")
+            version = result.stdout.decode().strip() or result.stderr.decode().strip()
+            logger.info(f"OpenKB (CLI): {version}")
+            openkb_found = True
     except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+    
+    # Способ 2: python -m openkb
+    if not openkb_found:
+        try:
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, "-m", "openkb", "--version"],
+                capture_output=True, timeout=10
+            )
+            if result.returncode == 0:
+                version = result.stdout.decode().strip() or result.stderr.decode().strip()
+                logger.info(f"OpenKB (python -m): {version}")
+                openkb_found = True
+        except Exception:
+            pass
+    
+    # Способ 3: Проверка импорта модуля
+    if not openkb_found:
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec("openkb")
+            if spec is not None:
+                logger.info("OpenKB: installed (module)")
+                openkb_found = True
+        except Exception:
+            pass
+    
+    if not openkb_found:
         missing.append("openkb")
         logger.warning("OpenKB not found. Install with: pip install openkb")
-    except Exception as e:
-        logger.warning(f"Could not check OpenKB: {e}")
     
     # Проверяем watchdog
     try:
