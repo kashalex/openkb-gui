@@ -185,7 +185,9 @@ class WatchService:
     def _start_openkb_watch(self):
         """Запуск openkb watch процесса"""
         try:
-            cmd = ["openkb", "watch", str(self.workspace_path)]
+            # openkb watch запускается без аргументов, работает в текущей директории
+            # Устанавливаем cwd в workspace_path чтобы следить за raw/ там
+            cmd = ["openkb", "watch"]
             
             self._openkb_process = subprocess.Popen(
                 cmd,

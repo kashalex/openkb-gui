@@ -532,9 +532,10 @@ class MainWindow(ctk.CTk):
         doc_count = build_service.count_documents()
         
         self._log_build(f"\n{'='*50}\n")
-        self._log_build(f"Starting build process...\n")
+        self._log_build(f"Compiling documents from raw/...\n")
         self._log_build(f"Workspace: {workspace}\n")
-        self._log_build(f"Documents in raw/: {doc_count}\n")
+        self._log_build(f"Documents to process: {doc_count}\n")
+        self._log_build(f"Command: openkb add raw/\n")
         self._log_build(f"{'='*50}\n\n")
         
         # Запускаем build

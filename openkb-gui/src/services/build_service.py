@@ -128,6 +128,63 @@ class BuildService:
         """Получение версии OpenKB"""
         return self._openkb_version
     
+    def is_initialized(self) -> bool:
+        """Проверка, инициализирована ли база знаний"""
+        # Проверяем наличие .openkb/config.yaml или wiki/ директории
+        openkb_config = self.workspace_path / ".openkb" / "config.yaml"
+        wiki_path = self.get_wiki_path()
+        return openkb_config.exists() or wiki_path.exists()
+    
+    def init_knowledge_base(self) -> bool:
+        """
+        Инициализация базы знаний (openkb init)
+        
+        Returns:
+            bool: True если успешно
+        """
+        if not self._openkb_available:
+            logger.error("OpenKB недоступен")
+            return False
+        
+        try:
+            if self._use_python_m:
+                cmd = [sys.executable, "-m", "openkb", "init"]
+            else:
+                cmd = ["openkb", "init"]
+            
+            # openkb init интерактивный, но можно попробовать с --non-interactive если есть
+            # или использовать echo для автоматического ответа
+            self._emit_output("Initializing knowledge base...")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(self.workspace_path),
+                env={**os.environ, "PYTHONUNBUFFERED": "1"}
+            )
+            
+            if result.returncode == 0:
+                self._emit_output("Knowledge base initialized successfully")
+                logger.info("База знаний инициализирована")
+                return True
+            else:
+                # Может потребоваться интерактивный ввод
+                error_msg = result.stderr.strip() or result.stdout.strip()
+                self._emit_output(f"Init output: {error_msg}")
+                logger.warning(f"Init returned {result.returncode}: {error_msg}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self._emit_output("Init timeout - may need manual initialization")
+            logger.warning("Таймаут инициализации")
+            return False
+        except Exception as e:
+            self._emit_output(f"Init error: {e}")
+            logger.error(f"Ошибка инициализации: {e}")
+            return False
+    
     def add_output_callback(self, callback: Callable[[str], None]):
         """
         Добавление callback для вывода
@@ -273,11 +330,35 @@ class BuildService:
                 ))
             return True
         
-        # Подготовка команды - используем python -m если прямой CLI не работает
+        # Проверяем инициализацию базы знаний
+        if not self.is_initialized():
+            self._emit_output("Knowledge base not initialized.")
+            self._emit_output("Running 'openkb init'...")
+            logger.info("База знаний не инициализирована, запускаем init")
+            
+            if not self.init_knowledge_base():
+                self._emit_output("")
+                self._emit_output("NOTE: 'openkb init' may require interactive input.")
+                self._emit_output("Please run manually in terminal:")
+                self._emit_output(f"  cd {self.workspace_path}")
+                self._emit_output("  openkb init")
+                self._emit_output("")
+                if on_complete:
+                    on_complete(BuildResult(
+                        success=False,
+                        exit_code=-1,
+                        output="",
+                        error="Knowledge base not initialized. Run 'openkb init' manually.",
+                        duration_seconds=0
+                    ))
+                return True
+        
+        # Подготовка команды - используем 'openkb add raw/' для компиляции документов
+        raw_path = self.get_raw_path()
         if self._use_python_m:
-            cmd = [sys.executable, "-m", "openkb", "build", str(self.workspace_path)]
+            cmd = [sys.executable, "-m", "openkb", "add", str(raw_path)]
         else:
-            cmd = ["openkb", "build", str(self.workspace_path)]
+            cmd = ["openkb", "add", str(raw_path)]
         
         if incremental:
             cmd.append("--incremental")
