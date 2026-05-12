@@ -552,7 +552,21 @@ class ProviderSelectorFrame(ctk.CTkFrame):
         self.fetch_models_btn.configure(state="normal", text="🔄 Fetch Models")
 
         if models:
-            model_ids = [m.get("id", m.get("name", "Unknown")) for m in models[:50]]  # Ограничиваем список
+            # Получаем список ID моделей
+            # Для разных провайдеров формат может отличаться:
+            # - OpenRouter: id уже содержит префикс (например, "anthropic/claude-...")
+            # - OpenAI, Groq: id без префикса (например, "gpt-4o"), нужно добавить префикс провайдера
+            provider = self.provider_service.get_provider(self._current_provider_id)
+            prefix = provider.prefix if provider else ""
+            
+            model_ids = []
+            for m in models[:50]:  # Ограничиваем список
+                model_id = m.get("id", m.get("name", "Unknown"))
+                # Если ID не содержит префикс слэша и у провайдера есть префикс, добавляем его
+                if "/" not in model_id and prefix and self._current_provider_id != "openrouter":
+                    model_id = f"{prefix}{model_id}"
+                model_ids.append(model_id)
+            
             self._update_status(True, f"Fetched {len(models)} models (showing first 50)")
 
             # Показываем диалог со списком моделей
@@ -577,6 +591,9 @@ class ProviderSelectorFrame(ctk.CTkFrame):
 
     def _select_fetched_model(self, model_id: str):
         """Выбор модели из полученного списка."""
+        # Для fetched моделей model_id уже может содержать префикс провайдера (например, "anthropic/claude-...")
+        # Сохраняем его как есть для использования в full_model
+        
         # Обновляем список моделей в dropdown с выбранной моделью
         current_values = list(self.model_dropdown.cget("values"))
         
@@ -604,24 +621,41 @@ class ProviderSelectorFrame(ctk.CTkFrame):
 
         model_name = self.model_dropdown.get()
         model_id = None
+        full_model = ""
         
-        # Сначала ищем модель в списке провайдера
-        if provider:
-            for model in provider.models:
-                if model.name == model_name:
-                    model_id = model.id
-                    break
+        # Проверяем, является ли модель fetched (уже содержит префикс провайдера)
+        # Fetched модели имеют формат "provider/model-name" (например, "anthropic/claude-3-sonnet")
+        is_fetched_model = "/" in model_name
         
-        # Если не нашли (модель была получена через API), используем имя напрямую
-        if not model_id and model_name and model_name != "Select provider first":
-            model_id = model_name
+        if is_fetched_model:
+            # Это fetched модель - используем её как есть для full_model
+            full_model = model_name
+            model_id = model_name  # Сохраняем полный ID для использования
+        else:
+            # Это стандартная модель из списка провайдера
+            # Сначала ищем модель в списке провайдера
+            if provider:
+                for model in provider.models:
+                    if model.name == model_name:
+                        model_id = model.id
+                        break
+            
+            # Если не нашли (модель была получена через API), используем имя напрямую
+            if not model_id and model_name and model_name != "Select provider first":
+                model_id = model_name
+            
+            # Формируем full_model с префиксом провайдера
+            if provider and model_id:
+                full_model = f"{provider.prefix}{model_id}"
+            elif model_name:
+                full_model = model_name
 
         return {
             "provider_id": self._current_provider_id,
             "model_id": model_id,
             "api_key": self.api_key_entry.get(),
             "api_base": self.base_url_entry.get() if self._current_provider_id == "custom" else "",
-            "full_model": f"{provider.prefix}{model_id}" if provider and model_id else model_name if model_name else "",
+            "full_model": full_model,
         }
 
 
