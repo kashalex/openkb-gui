@@ -577,9 +577,26 @@ class ProviderSelectorFrame(ctk.CTkFrame):
 
     def _select_fetched_model(self, model_id: str):
         """Выбор модели из полученного списка."""
-        # Для custom провайдера устанавливаем модель напрямую
-        if self._current_provider_id == "custom":
-            self.model_dropdown.set(model_id)
+        # Обновляем список моделей в dropdown с выбранной моделью
+        current_values = list(self.model_dropdown.cget("values"))
+        
+        # Если модели еще нет в списке, добавляем её
+        if model_id not in current_values:
+            current_values.append(model_id)
+            self.model_dropdown.configure(values=current_values)
+        
+        # Устанавливаем выбранную модель
+        self.model_dropdown.set(model_id)
+        
+        # Обновляем информацию о модели (сбрасываем, так как это fetched модель)
+        self.model_info_label.configure(text="🌐 Fetched from API")
+        
+        # Закрываем диалог со списком моделей
+        for widget in self.winfo_children():
+            if isinstance(widget, ctk.CTkToplevel):
+                widget.destroy()
+        
+        self._update_status(True, f"Selected model: {model_id}")
 
     def get_current_config(self) -> dict:
         """Получение текущей конфигурации."""
@@ -587,18 +604,24 @@ class ProviderSelectorFrame(ctk.CTkFrame):
 
         model_name = self.model_dropdown.get()
         model_id = None
+        
+        # Сначала ищем модель в списке провайдера
         if provider:
             for model in provider.models:
                 if model.name == model_name:
                     model_id = model.id
                     break
+        
+        # Если не нашли (модель была получена через API), используем имя напрямую
+        if not model_id and model_name and model_name != "Select provider first":
+            model_id = model_name
 
         return {
             "provider_id": self._current_provider_id,
             "model_id": model_id,
             "api_key": self.api_key_entry.get(),
             "api_base": self.base_url_entry.get() if self._current_provider_id == "custom" else "",
-            "full_model": f"{provider.prefix}{model_id}" if provider and model_id else "",
+            "full_model": f"{provider.prefix}{model_id}" if provider and model_id else model_name if model_name else "",
         }
 
 
