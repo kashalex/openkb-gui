@@ -1,6 +1,8 @@
 """
 Build Service - Управление компиляцией базы знаний через OpenKB
-Запуск openkb build через subprocess с thread-safe логированием
+Запуск openkb build через subprocess с timeout
+Поддержка всех провайдеров через ConfigService
+Валидация путей и обработка ошибок
 """
 
 import subprocess
@@ -8,13 +10,21 @@ import threading
 import queue
 import os
 import sys
+import json
 import logging
+import re
+import importlib.metadata
+import importlib.util
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+# Timeout для subprocess вызовов (секунды)
+BUILD_TIMEOUT = 600  # 10 минут максимум
 
 
 class BuildState(Enum):
@@ -23,6 +33,7 @@ class BuildState(Enum):
     BUILDING = "building"
     SUCCESS = "success"
     FAILED = "failed"
+    TIMEOUT = "timeout"
 
 
 @dataclass
@@ -33,6 +44,7 @@ class BuildResult:
     output: str
     error: str
     duration_seconds: float
+    timeout: bool = False
 
 
 class BuildService:
@@ -52,43 +64,73 @@ class BuildService:
         self.build_thread: Optional[threading.Thread] = None
         self._callbacks: list[Callable] = []
         
+        # Инициализируем ConfigService для получения актуальных настроек
+        from services.config_service import ConfigService
+        self._config_service = ConfigService.get_instance()
+        
         # Проверяем наличие openkb
         self._openkb_available = self._check_openkb()
         
         logger.info(f"BuildService инициализирован для: {self.workspace_path}")
     
+    def _get_openkb_installed_version(self) -> str:
+        """Best-effort package version for module-only OpenKB installs."""
+        try:
+            return importlib.metadata.version("openkb")
+        except importlib.metadata.PackageNotFoundError:
+            return "installed (version unknown)"
+
     def _check_openkb(self) -> bool:
-        """Проверка наличия OpenKB - пробуем разные способы"""
+        """Проверка наличия OpenKB теми же способами, что и startup check."""
         self._openkb_version = None
-        self._use_python_m = False  # Флаг: использовать python -m openkb
-        
-        # Способ 1: Прямой вызов openkb
+        self._use_python_m = False
+
+        # Способ 1: module in the current interpreter. This must be first for
+        # Windows venvs where `openkb`/`python -m openkb --version` can hang or
+        # fail while the package is importable and runnable for normal commands.
+        module_spec = importlib.util.find_spec("openkb")
+        if module_spec is not None:
+            self._openkb_version = self._get_openkb_installed_version()
+            if importlib.util.find_spec("openkb.__main__") is not None:
+                self._use_python_m = True
+                logger.info(
+                    "OpenKB найден (module): %s; build will use %s",
+                    self._openkb_version,
+                    f'"{sys.executable}" -m openkb'
+                )
+                return True
+            logger.debug("OpenKB module found, but openkb.__main__ is missing; trying CLI next")
+
+        # Способ 2: Прямой вызов openkb. Может быть доступен даже если модуль
+        # не установлен в текущий Python, например через отдельный CLI install.
         try:
             result = subprocess.run(
                 ["openkb", "--version"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=5
             )
             if result.returncode == 0:
                 version = result.stdout.strip() or result.stderr.strip()
                 logger.info(f"OpenKB найден (CLI): {version}")
                 self._openkb_version = version
                 return True
+            logger.debug("OpenKB CLI --version failed: %s", result.stderr.strip() or result.stdout.strip())
         except FileNotFoundError:
-            pass  # Продолжаем пробовать другие способы
+            logger.debug("OpenKB CLI executable not found in PATH")
         except subprocess.TimeoutExpired:
             logger.warning("Таймаут проверки OpenKB (CLI)")
         except Exception as e:
             logger.debug(f"OpenKB CLI check failed: {e}")
-        
-        # Способ 2: python -m openkb
+
+        # Способ 3: python -m openkb --version as a final explicit command
+        # probe. If this succeeds, build can safely use python -m openkb add.
         try:
             result = subprocess.run(
                 [sys.executable, "-m", "openkb", "--version"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=5
             )
             if result.returncode == 0:
                 version = result.stdout.strip() or result.stderr.strip()
@@ -96,28 +138,24 @@ class BuildService:
                 self._openkb_version = version
                 self._use_python_m = True
                 return True
+            logger.debug("python -m openkb --version failed: %s", result.stderr.strip() or result.stdout.strip())
         except FileNotFoundError:
             pass
         except subprocess.TimeoutExpired:
             logger.warning("Таймаут проверки OpenKB (python -m)")
         except Exception as e:
             logger.debug(f"OpenKB python -m check failed: {e}")
-        
-        # Способ 3: Проверка импорта модуля
-        try:
-            import importlib.util
-            spec = importlib.util.find_spec("openkb")
-            if spec is not None:
-                logger.info("OpenKB найден (модуль установлен)")
-                self._openkb_version = "installed"
-                self._use_python_m = True
-                return True
-        except Exception as e:
-            logger.debug(f"OpenKB module check failed: {e}")
-        
-        logger.warning("OpenKB не найден. Установите: pip install openkb")
+
+        if module_spec is not None:
+            logger.warning(
+                "OpenKB module is installed for this interpreter, but neither `openkb` CLI "
+                "nor `python -m openkb` is runnable. Reinstall with: %s -m pip install --force-reinstall openkb",
+                sys.executable
+            )
+        else:
+            logger.warning("OpenKB не найден. Установите: %s -m pip install openkb", sys.executable)
         return False
-    
+
     @property
     def openkb_available(self) -> bool:
         """Проверка доступности OpenKB"""
@@ -130,10 +168,110 @@ class BuildService:
     
     def is_initialized(self) -> bool:
         """Проверка, инициализирована ли база знаний"""
-        # Проверяем наличие .openkb/config.yaml или wiki/ директории
         openkb_config = self.workspace_path / ".openkb" / "config.yaml"
         wiki_path = self.get_wiki_path()
         return openkb_config.exists() or wiki_path.exists()
+    
+    def _validate_workspace_path(self) -> tuple:
+        """
+        Валидация пути к workspace
+        
+        Returns:
+            tuple: (валиден, сообщение)
+        """
+        path_str = str(self.workspace_path)
+        
+        # Проверка на опасные символы
+        dangerous_chars = ['<', '>', '|', '*', '?', '"']
+        for char in dangerous_chars:
+            if char in path_str:
+                return False, f"Путь содержит недопустимый символ: {char}"
+        
+        # Проверка длины пути (Windows ограничение ~260 символов)
+        if len(path_str) > 250:
+            return False, "Путь слишком длинный (максимум 250 символов)"
+        
+        return True, "OK"
+    
+    def _setup_api(self) -> bool:
+        """Настройка API для LLM вызовов (все провайдеры)"""
+        config = self._config_service.config
+        
+        # Получаем текущую модель и провайдера
+        model = config.llm_model
+        provider = config.get_current_provider()
+        api_key = config.get_api_key_for_provider(provider)
+        
+        if not api_key:
+            logger.warning(f"API ключ не настроен для провайдера: {provider}")
+            return False
+        
+        # Устанавливаем переменные окружения для LiteLLM
+        if provider == "zai":
+            os.environ["ZAI_API_KEY"] = api_key
+        elif provider == "openrouter":
+            os.environ["OPENROUTER_API_KEY"] = api_key
+            os.environ["OPENROUTER_API_BASE"] = "https://openrouter.ai/api/v1"
+        
+        # Также устанавливаем общий LLM_API_KEY для совместимости
+        os.environ["LLM_API_KEY"] = api_key
+        os.environ["LLM_MODEL"] = model
+        
+        logger.info(f"API настроен: провайдер={provider}, модель={model}")
+        self._emit_output(f"Provider: {provider}, Model: {model}")
+        return True
+    
+    def _get_current_model(self) -> str:
+        """Получение текущей модели из ConfigService"""
+        config = self._config_service.config
+        return config.llm_model or "zai/glm-4.5-flash"
+    
+    def _update_model_config(self) -> bool:
+        """
+        Обновление конфигурации модели в .openkb/config.yaml
+        
+        Returns:
+            bool: True если успешно
+        """
+        try:
+            current_model = self._get_current_model()
+            config_path = self.workspace_path / ".openkb" / "config.yaml"
+            
+            if config_path.exists():
+                # Читаем существующий конфиг
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Заменяем модель
+                new_content = re.sub(
+                    r'^model:.*$',
+                    f'model: {current_model}',
+                    content,
+                    flags=re.MULTILINE
+                )
+                
+                # Если модель не найдена, добавляем её
+                if new_content == content and 'model:' not in content:
+                    new_content = f'model: {current_model}\n' + content
+                
+                config_path.write_text(new_content, encoding='utf-8')
+                self._emit_output(f"Configured model: {current_model}")
+            else:
+                # Создаём новый конфиг
+                config_path.parent.mkdir(parents=True, exist_ok=True)
+                config_content = f"""model: {current_model}
+language: ru
+pageindex_threshold: 20
+"""
+                config_path.write_text(config_content, encoding="utf-8")
+                self._emit_output(f"Created config with model: {current_model}")
+            
+            logger.info(f"Обновлена модель в конфиге: {current_model}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления конфига модели: {e}")
+            return False
     
     def init_knowledge_base(self) -> bool:
         """
@@ -147,43 +285,50 @@ class BuildService:
             return False
         
         try:
-            if self._use_python_m:
-                cmd = [sys.executable, "-m", "openkb", "init"]
-            else:
-                cmd = ["openkb", "init"]
+            # Создаём структуру директорий
+            self._ensure_structure()
             
-            # openkb init интерактивный, но можно попробовать с --non-interactive если есть
-            # или использовать echo для автоматического ответа
-            self._emit_output("Initializing knowledge base...")
+            # Используем модель из ConfigService (поддержка всех провайдеров)
+            current_model = self._get_current_model()
             
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                cwd=str(self.workspace_path),
-                env={**os.environ, "PYTHONUNBUFFERED": "1"}
-            )
+            # Создаём или обновляем конфигурационный файл
+            config_path = self.workspace_path / ".openkb" / "config.yaml"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
             
-            if result.returncode == 0:
-                self._emit_output("Knowledge base initialized successfully")
-                logger.info("База знаний инициализирована")
-                return True
-            else:
-                # Может потребоваться интерактивный ввод
-                error_msg = result.stderr.strip() or result.stdout.strip()
-                self._emit_output(f"Init output: {error_msg}")
-                logger.warning(f"Init returned {result.returncode}: {error_msg}")
-                return False
+            config_content = f"""model: {current_model}
+language: ru
+pageindex_threshold: 20
+"""
+            config_path.write_text(config_content, encoding="utf-8")
+            self._emit_output(f"Configured model: {current_model}")
+            
+            # Создаём hashes.json
+            hashes_path = self.workspace_path / ".openkb" / "hashes.json"
+            if not hashes_path.exists():
+                hashes_path.write_text("{}", encoding="utf-8")
+            
+            logger.info(f"База знаний инициализирована с моделью: {current_model}")
+            return True
                 
-        except subprocess.TimeoutExpired:
-            self._emit_output("Init timeout - may need manual initialization")
-            logger.warning("Таймаут инициализации")
-            return False
         except Exception as e:
             self._emit_output(f"Init error: {e}")
             logger.error(f"Ошибка инициализации: {e}")
             return False
+    
+    def _ensure_structure(self):
+        """Создание структуры директорий workspace"""
+        dirs = [
+            self.workspace_path / "raw",
+            self.workspace_path / "wiki" / "concepts",
+            self.workspace_path / "wiki" / "summaries",
+            self.workspace_path / "wiki" / "sources",
+            self.workspace_path / "wiki" / "reports",
+            self.workspace_path / "sessions",
+            self.workspace_path / "logs",
+            self.workspace_path / ".openkb",
+        ]
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
     
     def add_output_callback(self, callback: Callable[[str], None]):
         """
@@ -203,12 +348,7 @@ class BuildService:
                 logger.error(f"Ошибка в callback: {e}")
     
     def _read_stdout(self, process: subprocess.Popen):
-        """
-        Чтение stdout процесса в отдельном потоке
-        
-        Args:
-            process: Процесс для чтения
-        """
+        """Чтение stdout процесса в отдельном потоке"""
         try:
             for line in iter(process.stdout.readline, ''):
                 if line:
@@ -218,12 +358,7 @@ class BuildService:
             logger.error(f"Ошибка чтения stdout: {e}")
     
     def _read_stderr(self, process: subprocess.Popen):
-        """
-        Чтение stderr процесса в отдельном потоке
-        
-        Args:
-            process: Процесс для чтения
-        """
+        """Чтение stderr процесса в отдельном потоке"""
         try:
             for line in iter(process.stderr.readline, ''):
                 if line:
@@ -236,11 +371,11 @@ class BuildService:
               on_complete: Optional[Callable[[BuildResult], None]] = None,
               incremental: bool = False) -> bool:
         """
-        Запуск build процесса
+        Запуск build процесса через subprocess с timeout
         
         Args:
             on_complete: Callback при завершении
-            incremental: Инкрементальная сборка (только изменённые файлы)
+            incremental: Инкрементальная сборка
         
         Returns:
             bool: True если процесс запущен успешно
@@ -249,73 +384,26 @@ class BuildService:
             logger.warning("Build уже выполняется")
             return False
         
+        # Валидация пути
+        is_valid, msg = self._validate_workspace_path()
+        if not is_valid:
+            self._emit_output(f"ERROR: {msg}")
+            return False
+        
         if not self._openkb_available:
             logger.error("OpenKB недоступен. Установите: pip install openkb")
-            self.state = BuildState.BUILDING
-            
-            # Запускаем в отдельном потоке для имитации процесса
-            def run_mock_build():
-                import time
-                start_time = time.time()
-                
-                self._emit_output("="*50)
-                self._emit_output("MOCK BUILD MODE (OpenKB not installed)")
-                self._emit_output("="*50)
-                self._emit_output("")
-                self._emit_output("To install OpenKB, run:")
-                self._emit_output("  pip install openkb")
-                self._emit_output("")
-                self._emit_output("Simulating build process for demonstration...")
-                self._emit_output("")
-                
-                # Имитация обработки документов
-                doc_count = self.count_documents()
-                self._emit_output(f"Found {doc_count} documents in raw/")
-                
-                if doc_count > 0:
-                    for i in range(1, doc_count + 1):
-                        time.sleep(0.3)  # Имитация обработки
-                        self._emit_output(f"  Processing document {i}/{doc_count}...")
-                else:
-                    self._emit_output("  No documents found in raw/ directory")
-                    self._emit_output("  Add .pdf, .docx, .txt or .md files to raw/ folder")
-                
-                self._emit_output("")
-                self._emit_output("Compiling wiki pages...")
-                time.sleep(0.5)
-                self._emit_output("  Generating concepts...")
-                time.sleep(0.3)
-                self._emit_output("  Creating summaries...")
-                time.sleep(0.3)
-                self._emit_output("  Building wikilinks...")
-                time.sleep(0.2)
-                
-                duration = time.time() - start_time
-                
-                self._emit_output("")
-                self._emit_output("="*50)
-                self._emit_output("MOCK BUILD COMPLETE")
-                self._emit_output(f"Duration: {duration:.1f}s")
-                self._emit_output("="*50)
-                self._emit_output("")
-                self._emit_output("NOTE: This was a simulation.")
-                self._emit_output("Install openkb package for real functionality:")
-                self._emit_output("  pip install openkb")
-                
-                self.state = BuildState.SUCCESS
-                
-                if on_complete:
-                    on_complete(BuildResult(
-                        success=True,
-                        exit_code=0,
-                        output="Mock build completed (OpenKB not installed)",
-                        error="",
-                        duration_seconds=duration
-                    ))
-            
-            self.build_thread = threading.Thread(target=run_mock_build, daemon=True)
-            self.build_thread.start()
-            return True
+            self._emit_output("ERROR: OpenKB is not installed. Real build cannot run.")
+            self._emit_output("Install with: pip install openkb")
+            self.state = BuildState.FAILED
+            if on_complete:
+                on_complete(BuildResult(
+                    success=False,
+                    exit_code=-2,
+                    output="",
+                    error="OpenKB is not installed; mock builds are disabled for production checks",
+                    duration_seconds=0
+                ))
+            return False
         
         if not self.workspace_path.exists():
             logger.error(f"Workspace не существует: {self.workspace_path}")
@@ -330,30 +418,112 @@ class BuildService:
                 ))
             return True
         
+        # Проверяем и создаём структуру
+        self._ensure_structure()
+
+        doc_count = self.count_documents()
+        if doc_count == 0:
+            message = "No supported documents found in raw/ (including nested folders)."
+            self._emit_output(f"ERROR: {message}")
+            self.state = BuildState.FAILED
+            if on_complete:
+                on_complete(BuildResult(
+                    success=False,
+                    exit_code=-3,
+                    output="",
+                    error=message,
+                    duration_seconds=0
+                ))
+            return False
+        self._emit_output(f"Found {doc_count} supported document(s) in raw/.")
+        
+        # Всегда обновляем конфигурацию модели (для поддержки смены провайдера)
+        self._update_model_config()
+        
         # Проверяем инициализацию базы знаний
         if not self.is_initialized():
             self._emit_output("Knowledge base not initialized.")
-            self._emit_output("Running 'openkb init'...")
-            logger.info("База знаний не инициализирована, запускаем init")
+            self._emit_output("Creating configuration...")
             
             if not self.init_knowledge_base():
-                self._emit_output("")
-                self._emit_output("NOTE: 'openkb init' may require interactive input.")
-                self._emit_output("Please run manually in terminal:")
-                self._emit_output(f"  cd {self.workspace_path}")
-                self._emit_output("  openkb init")
-                self._emit_output("")
+                self._emit_output("ERROR: Failed to initialize knowledge base")
                 if on_complete:
                     on_complete(BuildResult(
                         success=False,
                         exit_code=-1,
                         output="",
-                        error="Knowledge base not initialized. Run 'openkb init' manually.",
+                        error="Knowledge base initialization failed",
                         duration_seconds=0
                     ))
                 return True
         
-        # Подготовка команды - используем 'openkb add raw/' для компиляции документов
+        # Настраиваем API для текущего провайдера
+        current_model = self._get_current_model()
+        config = self._config_service.config
+        provider = config.get_current_provider()
+        
+        self._emit_output(f"Configuring API for {provider}...")
+        if self._setup_api():
+            self._emit_output(f"API configured: {current_model}")
+        else:
+            self._emit_output(f"Warning: Could not configure API for {provider}")
+        
+        self.state = BuildState.BUILDING
+        
+        # Всегда используем subprocess для изоляции
+        return self._run_build_subprocess(on_complete, incremental)
+    
+    def _run_mock_build(self, on_complete: Optional[Callable]) -> bool:
+        """Запуск mock build когда OpenKB не установлен"""
+        def run_mock():
+            import time
+            start_time = time.time()
+            
+            self._emit_output("=" * 50)
+            self._emit_output("MOCK BUILD MODE (OpenKB not installed)")
+            self._emit_output("=" * 50)
+            self._emit_output("")
+            self._emit_output("To install OpenKB, run:")
+            self._emit_output("  pip install openkb")
+            self._emit_output("")
+            self._emit_output("Simulating build process...")
+            
+            doc_count = self.count_documents()
+            self._emit_output(f"Found {doc_count} documents in raw/")
+            
+            if doc_count > 0:
+                for i in range(1, doc_count + 1):
+                    time.sleep(0.3)
+                    self._emit_output(f"  Would process document {i}/{doc_count}...")
+            else:
+                self._emit_output("  No documents found in raw/")
+                self._emit_output("  Add .pdf, .docx, .txt or .md files to raw/")
+            
+            duration = time.time() - start_time
+            
+            self._emit_output("")
+            self._emit_output("=" * 50)
+            self._emit_output("MOCK BUILD STOPPED: this is not a successful production build")
+            self._emit_output(f"Duration: {duration:.1f}s")
+            self._emit_output("=" * 50)
+            
+            self.state = BuildState.FAILED
+            
+            if on_complete:
+                on_complete(BuildResult(
+                    success=False,
+                    exit_code=-2,
+                    output="Mock build did not create a knowledge base",
+                    error="OpenKB is not installed; install OpenKB to run a real build",
+                    duration_seconds=duration
+                ))
+        
+        self.build_thread = threading.Thread(target=run_mock, daemon=True)
+        self.build_thread.start()
+        return True
+    
+    def _run_build_subprocess(self, on_complete: Optional[Callable], incremental: bool) -> bool:
+        """Запуск build через subprocess с timeout"""
         raw_path = self.get_raw_path()
         if self._use_python_m:
             cmd = [sys.executable, "-m", "openkb", "add", str(raw_path)]
@@ -364,9 +534,7 @@ class BuildService:
             cmd.append("--incremental")
         
         logger.info(f"Запуск build: {' '.join(cmd)}")
-        self.state = BuildState.BUILDING
         
-        # Запуск в отдельном потоке
         def run_build():
             import time
             start_time = time.time()
@@ -398,8 +566,25 @@ class BuildService:
                 stdout_thread.start()
                 stderr_thread.start()
                 
-                # Ожидание завершения
-                self.process.wait()
+                # Ожидание завершения с timeout
+                try:
+                    self.process.wait(timeout=BUILD_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self._emit_output(f"ERROR: Build timeout after {BUILD_TIMEOUT}s")
+                    self.state = BuildState.TIMEOUT
+                    
+                    if on_complete:
+                        on_complete(BuildResult(
+                            success=False,
+                            exit_code=-1,
+                            output="",
+                            error=f"Timeout after {BUILD_TIMEOUT}s",
+                            duration_seconds=BUILD_TIMEOUT,
+                            timeout=True
+                        ))
+                    return
+                
                 stdout_thread.join(timeout=5)
                 stderr_thread.join(timeout=5)
                 
@@ -420,13 +605,25 @@ class BuildService:
                     error=''.join(error_lines),
                     duration_seconds=duration
                 )
+
+                if result.success and self.count_generated_wiki_pages() == 0:
+                    result.success = False
+                    result.exit_code = -4
+                    result.error = (result.error + "\n" if result.error else "") + (
+                        "Build finished with exit code 0 but no generated wiki pages were found"
+                    )
+                    self._emit_output("ERROR: Build produced no generated wiki pages")
                 
                 if result.success:
                     self.state = BuildState.SUCCESS
-                    logger.info(f"Build завершён успешно за {duration:.1f}с")
+                    page_count = self.count_generated_wiki_pages()
+                    self._emit_output(f"Build completed successfully in {duration:.1f}s")
+                    self._emit_output(f"Generated wiki pages: {page_count}")
+                    logger.info(f"Build завершён успешно за {duration:.1f}с; pages={page_count}")
                 else:
                     self.state = BuildState.FAILED
-                    logger.error(f"Build failed с кодом {result.exit_code}")
+                    self._emit_output(f"Build failed with exit code {result.exit_code}")
+                    logger.error(f"Build failed с кодом {result.exit_code}: {result.error}")
                 
                 if on_complete:
                     on_complete(result)
@@ -434,6 +631,7 @@ class BuildService:
             except Exception as e:
                 self.state = BuildState.FAILED
                 logger.error(f"Ошибка build: {e}")
+                self._emit_output(f"ERROR: {e}")
                 
                 if on_complete:
                     on_complete(BuildResult(
@@ -462,7 +660,6 @@ class BuildService:
             logger.info("Остановка build процесса")
             try:
                 self.process.terminate()
-                # Ждём graceful shutdown
                 try:
                     self.process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
@@ -515,10 +712,21 @@ class BuildService:
         if not raw_path.exists():
             return 0
         
-        extensions = {'.pdf', '.docx', '.txt', '.md'}
+        extensions = {'.pdf', '.docx', '.txt', '.md', '.markdown'}
         count = 0
-        for f in raw_path.iterdir():
+        for f in raw_path.rglob("*"):
             if f.is_file() and f.suffix.lower() in extensions:
+                count += 1
+        return count
+
+    def count_generated_wiki_pages(self) -> int:
+        """Подсчёт сгенерированных страниц wiki, исключая служебный AGENTS.md."""
+        wiki_path = self.get_wiki_path()
+        if not wiki_path.exists():
+            return 0
+        count = 0
+        for f in wiki_path.rglob("*.md"):
+            if f.is_file() and f.name != "AGENTS.md":
                 count += 1
         return count
     

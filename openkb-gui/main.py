@@ -8,16 +8,49 @@ import sys
 import os
 import logging
 from pathlib import Path
+from types import ModuleType
 
 # Добавляем src в path
 src_path = Path(__file__).parent / "src"
 if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
-import customtkinter as ctk
-
-from gui.main_window import MainWindow
 from services.config_service import ConfigService
+
+
+def _format_python_command(*args: str) -> str:
+    """Return a command pinned to the interpreter that is running the app."""
+    executable = sys.executable or "python"
+    return " ".join([f'"{executable}"', *args])
+
+
+def _missing_dependency_message(package: str, import_name: str) -> str:
+    """Build an actionable dependency error for venv/interpreter mismatches."""
+    return (
+        f"ERROR: Python package '{package}' is not installed for this interpreter.\n\n"
+        f"Interpreter running OpenKB GUI:\n  {sys.executable}\n\n"
+        "Install dependencies with the same interpreter, not a different global pip:\n"
+        f"  {_format_python_command('-m', 'pip', 'install', '-r', 'requirements.txt')}\n"
+        f"  {_format_python_command('-m', 'pip', 'install', package)}\n\n"
+        "Verify that python and pip point to the same environment:\n"
+        f"  {_format_python_command('-c', '"import sys; print(sys.executable)"')}\n"
+        f"  {_format_python_command('-m', 'pip', '--version')}\n\n"
+        f"If `pip install {package}` says 'Requirement already satisfied' but "
+        f"`import {import_name}` still fails, your `pip` command is installing into another Python. "
+        "Use `python -m pip ...` from the activated venv."
+    )
+
+
+def import_customtkinter_or_exit() -> ModuleType:
+    """Import CustomTkinter with a clear message when the active venv is wrong."""
+    try:
+        import customtkinter as ctk
+        return ctk
+    except ModuleNotFoundError as exc:
+        if exc.name != "customtkinter":
+            raise
+        print(_missing_dependency_message("customtkinter", "customtkinter"), file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 def setup_logging(log_level: str = "INFO"):
@@ -97,7 +130,7 @@ def check_dependencies():
     
     if not openkb_found:
         missing.append("openkb")
-        logger.warning("OpenKB not found. Install with: pip install openkb")
+        logger.warning("OpenKB not found. Install with: %s", _format_python_command("-m", "pip", "install", "openkb"))
     
     # Проверяем watchdog
     try:
@@ -105,7 +138,7 @@ def check_dependencies():
         logger.info("Watchdog: installed")
     except ImportError:
         missing.append("watchdog")
-        logger.warning("Watchdog not found. Install with: pip install watchdog")
+        logger.warning("Watchdog not found. Install with: %s", _format_python_command("-m", "pip", "install", "watchdog"))
     
     # Проверяем litellm
     try:
@@ -113,7 +146,7 @@ def check_dependencies():
         logger.info("LiteLLM: installed")
     except ImportError:
         missing.append("litellm")
-        logger.warning("LiteLLM not found. Install with: pip install litellm")
+        logger.warning("LiteLLM not found. Install with: %s", _format_python_command("-m", "pip", "install", "litellm"))
     
     return missing
 
@@ -149,7 +182,11 @@ def main():
     config_service.ensure_workspace()
     logger.info(f"Workspace: {config_service.get_workspace_path()}")
     
-    # Настройка CustomTkinter
+    # Настройка CustomTkinter. Import happens here so missing GUI deps show
+    # an actionable venv/pip diagnostic instead of a raw traceback.
+    ctk = import_customtkinter_or_exit()
+    from gui.main_window import MainWindow
+
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("blue")
     
@@ -163,10 +200,12 @@ def main():
             app._log_build("⚠ WARNING: Missing Dependencies\n")
             app._log_build("="*50 + "\n\n")
             app._log_build(f"Missing: {', '.join(missing)}\n")
-            app._log_build(f"Install with: pip install {' '.join(missing)}\n\n")
+            app._log_build(
+                f"Install with: {_format_python_command('-m', 'pip', 'install', *missing)}\n\n"
+            )
             if 'openkb' in missing:
                 app._log_build("OpenKB is required for build functionality.\n")
-                app._log_build("Without it, the Build tab will run in DEMO mode.\n\n")
+                app._log_build("Without it, the Build tab cannot run a production build.\n\n")
             app._log_build("="*50 + "\n\n")
         app.after(100, show_missing_warning)
     

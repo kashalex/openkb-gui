@@ -1,0 +1,84 @@
+# OpenKB GUI - Git Ignore File
+# Защита конфиденциальных данных и временных файлов
+
+# === API Keys & Secrets (КРИТИЧНО!) ===
+.env
+.env.local
+.env.*.local
+*.env
+.z-ai-config
+.z-ai-config.json
+
+# === Workspace Data ===
+workspace/
+raw/
+wiki/
+sessions/
+logs/
+
+# === OpenKB Internal ===
+.openkb/
+hashes.json
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# === Virtual Environments ===
+venv/
+ENV/
+env/
+.venv/
+
+# === IDE ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# === OS Files ===
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# === Logs ===
+*.log
+logs/
+
+# === Temporary Files ===
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# === Archives (optional) ===
+# *.tar.gz
+# *.zip
+.env
